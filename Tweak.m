@@ -1,20 +1,29 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import "fishhook.h"
 #include <time.h>
 #include <sys/time.h>
 
 static const NSTimeInterval kOffset = -(600.0 * 24.0 * 60.0 * 60.0);
 
-/* Original NSDate implementation */
-static NSDate *(*orig_date)(id, SEL);
+/* NSDate +date */
+static NSDate *(*orig_NSDate_date)(id, SEL);
 
-static NSDate *hook_date(id self, SEL _cmd)
+static NSDate *hook_NSDate_date(id self, SEL cmd)
 {
-    NSDate *realDate = orig_date(self, _cmd);
+    NSDate *realDate = orig_NSDate_date(self, cmd);
     return [realDate dateByAddingTimeInterval:kOffset];
 }
 
-/* Original time() */
+/* NSDate -timeIntervalSinceNow */
+static NSTimeInterval (*orig_timeIntervalSinceNow)(id, SEL);
+
+static NSTimeInterval hook_timeIntervalSinceNow(id self, SEL cmd)
+{
+    return orig_timeIntervalSinceNow(self, cmd) + kOffset;
+}
+
+/* C time() */
 static time_t (*orig_time)(time_t *);
 
 static time_t hook_time(time_t *t)
@@ -28,7 +37,7 @@ static time_t hook_time(time_t *t)
     return result;
 }
 
-/* Original gettimeofday() */
+/* C gettimeofday() */
 static int (*orig_gettimeofday)(struct timeval *, void *);
 
 static int hook_gettimeofday(struct timeval *tv, void *tz)
@@ -41,115 +50,68 @@ static int hook_gettimeofday(struct timeval *tv, void *tz)
     return result;
 }
 
-/*
- * Minimal symbol rebinding implementation.
- *
- * This is intentionally kept inside the tweak so there is no
- * external Substrate/fishhook dependency.
- */
-
-struct rebinding {
-    const char *name;
-    void *replacement;
-    void **replaced;
-};
-
-static void rebind_symbols(struct rebinding *bindings, size_t count);
-
-static void init_tweak(void)
+__attribute__((constructor))
+static void init(void)
 {
+    /*
+     * Hook NSDate +date.
+     */
     Class NSDateClass = objc_getClass("NSDate");
 
     if (NSDateClass) {
-        Method method = class_getClassMethod(NSDateClass, @selector(date));
+        Method dateMethod =
+            class_getClassMethod(NSDateClass, @selector(date));
 
-        if (method) {
-            orig_date = (NSDate *(*)(id, SEL))method_getImplementation(method);
+        if (dateMethod) {
+            orig_NSDate_date =
+                (NSDate *(*)(id, SEL))
+                method_getImplementation(dateMethod);
 
             method_setImplementation(
-                method,
-                (IMP)hook_date
+                dateMethod,
+                (IMP)hook_NSDate_date
+            );
+        }
+
+        /*
+         * Hook NSDate -timeIntervalSinceNow.
+         */
+        Method intervalMethod =
+            class_getInstanceMethod(
+                NSDateClass,
+                @selector(timeIntervalSinceNow)
+            );
+
+        if (intervalMethod) {
+            orig_timeIntervalSinceNow =
+                (NSTimeInterval (*)(id, SEL))
+                method_getImplementation(intervalMethod);
+
+            method_setImplementation(
+                intervalMethod,
+                (IMP)hook_timeIntervalSinceNow
             );
         }
     }
 
     /*
-     * Resolve the original C functions dynamically.
-     * The workflow supplies the small rebinding implementation below.
+     * Hook C time functions using fishhook.
      */
-    rebind_symbols(
-        (struct rebinding[]) {
-            {
-                "time",
-                (void *)hook_time,
-                (void **)&orig_time
-            },
-            {
-                "gettimeofday",
-                (void *)hook_gettimeofday,
-                (void **)&orig_gettimeofday
-            }
+    struct rebinding rebindings[] = {
+        {
+            "time",
+            (void *)hook_time,
+            (void **)&orig_time
         },
-        2
+        {
+            "gettimeofday",
+            (void *)hook_gettimeofday,
+            (void **)&orig_gettimeofday
+        }
+    };
+
+    rebind_symbols(
+        rebindings,
+        sizeof(rebindings) / sizeof(rebindings[0])
     );
-}
-
-/*
- * Lightweight fishhook-compatible implementation.
- */
-
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
-#include <mach-o/nlist.h>
-#include <mach-o/dyld_images.h>
-#include <dlfcn.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdint.h>
-
-#if __LP64__
-
-static void perform_rebinding(
-    struct mach_header_64 *header,
-    intptr_t slide,
-    struct rebinding *bindings,
-    size_t count
-)
-{
-    /*
-     * We only need the dynamically bound symbols used by this tweak.
-     * The full fishhook implementation is supplied by the workflow.
-     */
-    (void)header;
-    (void)slide;
-    (void)bindings;
-    (void)count;
-}
-
-#endif
-
-static void rebind_symbols(struct rebinding *bindings, size_t count)
-{
-    /*
-     * The actual symbol rebinding is implemented by the vendored
-     * fishhook source included during the GitHub build.
-     */
-    void (*real_rebind)(
-        struct rebinding *,
-        size_t
-    );
-
-    real_rebind = dlsym(
-        RTLD_DEFAULT,
-        "rebind_symbols"
-    );
-
-    if (real_rebind)
-        real_rebind(bindings, count);
-}
-
-__attribute__((constructor))
-static void constructor(void)
-{
-    init_tweak();
 }
