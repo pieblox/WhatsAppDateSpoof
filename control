@@ -1,0 +1,9 @@
+Package: com.coalblox.whatsappdatespoof
+Name: WhatsApp Date Spoof
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Makes WhatsApp perceive an earlier date without changing the system clock.
+Maintainer: Coalblox
+Author: Coalblox
+Section: Tweaks
+Depends: mobilesubstrate
