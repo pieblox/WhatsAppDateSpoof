@@ -13,21 +13,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install LLVM tools
+      - name: Install tools
         run: |
-          brew install llvm
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          brew install dpkg
 
       - name: Download iOS SDK
         run: |
           git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git SDKs
-          SDK=$(find SDKs -maxdepth 2 -type d -name 'iPhoneOS*.sdk' | sort -V | tail -1)
-          echo "SDK=$SDK" >> "$GITHUB_ENV"
+          SDK=$(find SDKs -type d -name 'iPhoneOS*.sdk' | sort -V | grep 'iPhoneOS12' | tail -1)
+          if [ -z "$SDK" ]; then
+            echo "No iOS 12 SDK found"
+            exit 1
+          fi
+          echo "SDK=$PWD/$SDK" >> "$GITHUB_ENV"
+
+      - name: Download Substrate SDK
+        run: |
+          git clone --depth 1 https://github.com/r-plus/substrate.git SubstrateSDK || true
+          find SubstrateSDK -iname 'substrate.h' -o -iname 'CydiaSubstrate.h' || true
+
+      - name: Locate Substrate
+        run: |
+          HEADER=$(find SubstrateSDK -type f \( -name 'substrate.h' -o -name 'CydiaSubstrate.h' \) | head -1)
+          if [ -z "$HEADER" ]; then
+            echo "Substrate header was not found"
+            exit 1
+          fi
+
+          mkdir -p substrate/include
+          cp "$HEADER" substrate/include/substrate.h
+
+          echo "Substrate header:"
+          cat substrate/include/substrate.h
 
       - name: Build dylib
         run: |
           clang -arch arm64 \
             -isysroot "$SDK" \
+            -I"$PWD/substrate/include" \
             -miphoneos-version-min=12.0 \
             -fobjc-arc \
             -dynamiclib \
@@ -38,14 +61,18 @@ jobs:
       - name: Create package
         run: |
           mkdir -p package/Library/MobileSubstrate/DynamicLibraries
-          cp WhatsAppDateSpoof.dylib package/Library/MobileSubstrate/DynamicLibraries/
-          cp WhatsAppDateSpoof.plist package/Library/MobileSubstrate/DynamicLibraries/
+          cp WhatsAppDateSpoof.dylib \
+            package/Library/MobileSubstrate/DynamicLibraries/
+
+          cp WhatsAppDateSpoof.plist \
+            package/Library/MobileSubstrate/DynamicLibraries/
 
           mkdir -p package/DEBIAN
           cp control package/DEBIAN/control
 
           mkdir -p packages
-          dpkg-deb --build package packages/com.coalblox.whatsappdatespoof_1.0.0_iphoneos-arm.deb
+          dpkg-deb --build package \
+            packages/com.coalblox.whatsappdatespoof_1.0.0_iphoneos-arm.deb
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
