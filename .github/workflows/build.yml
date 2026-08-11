@@ -13,46 +13,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install tools
         run: |
           brew install dpkg
 
-      - name: Download iOS SDK
+      - name: Get iOS SDK
         run: |
           git clone --depth 1 https://github.com/xybp888/iOS-SDKs.git SDKs
 
-          SDK=$(find SDKs -type d -name 'iPhoneOS12*.sdk' | sort -V | tail -1)
+          SDK=$(find SDKs -type d -name 'iPhoneOS*.sdk' | sort -V | grep 'iPhoneOS12' | tail -1)
 
           if [ -z "$SDK" ]; then
-            echo "No iOS 12 SDK found"
+            echo "::error::No iOS 12 SDK found"
+            find SDKs -type d -name '*.sdk' | head -50
             exit 1
           fi
 
           echo "Using SDK: $SDK"
           echo "SDK=$PWD/$SDK" >> "$GITHUB_ENV"
 
-      - name: Download fishhook
+      - name: Get fishhook
         run: |
           git clone --depth 1 https://github.com/facebook/fishhook.git fishhook
-
           test -f fishhook/fishhook.c
           test -f fishhook/fishhook.h
 
-      - name: Replace tweak with fishhook implementation
+      - name: Build dylib
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          tweak = Path("Tweak.m").read_text()
-          fishhook = Path("fishhook/fishhook.c").read_text()
-
-          # Keep the tweak source separate from fishhook's implementation.
-          Path("fishhook_build.c").write_text(fishhook)
-          PY
-
-      - name: Build tweak
-        run: |
-          clang -arch arm64 \
+          clang \
+            -arch arm64 \
             -isysroot "$SDK" \
             -miphoneos-version-min=12.0 \
             -fobjc-arc \
@@ -61,12 +50,20 @@ jobs:
             -framework Foundation \
             -o WhatsAppDateSpoof.dylib \
             Tweak.m \
-            fishhook_build.c
+            fishhook/fishhook.c
+
+          echo "Checking dylib:"
+          file WhatsAppDateSpoof.dylib
+          ls -lh WhatsAppDateSpoof.dylib
 
       - name: Create Debian package
         run: |
-          mkdir -p package/Library/MobileSubstrate/DynamicLibraries
-          mkdir -p package/DEBIAN
+          rm -rf package packages
+
+          mkdir -p \
+            package/Library/MobileSubstrate/DynamicLibraries \
+            package/DEBIAN \
+            packages
 
           cp WhatsAppDateSpoof.dylib \
             package/Library/MobileSubstrate/DynamicLibraries/
@@ -76,14 +73,37 @@ jobs:
 
           cp control package/DEBIAN/control
 
-          mkdir -p packages
-
           dpkg-deb --build \
             package \
             packages/com.coalblox.whatsappdatespoof_1.0.0_iphoneos-arm.deb
 
+      - name: VERIFY DEB EXISTS
+        run: |
+          echo "Contents of packages:"
+          ls -lah packages/
+
+          COUNT=$(find packages -maxdepth 1 -type f -name '*.deb' | wc -l)
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::Expected exactly one .deb, found $COUNT"
+            exit 1
+          fi
+
+          DEB=$(find packages -maxdepth 1 -type f -name '*.deb')
+
+          echo "Found:"
+          echo "$DEB"
+
+          echo "Package information:"
+          dpkg-deb -I "$DEB"
+
+          echo "Package contents:"
+          dpkg-deb -c "$DEB"
+
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: WhatsAppDateSpoof
+          name: WhatsAppDateSpoof-DEB
           path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
